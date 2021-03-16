@@ -3,7 +3,7 @@ import string
 from typing import Any, Tuple, Optional, List, Iterable, Dict
 
 
-EMPTY = ("concat", [])
+EMPTY: Tuple[str, Any] = ("concat", [])
 
 
 def parse_pattern(s: str) -> Tuple[str, Any]:
@@ -257,16 +257,51 @@ def enumerate_pattern(tree: Tuple[str, Any], char_vars: List[str], constraints: 
     return visit()
 
 
+def make_xvars(size: int) -> List[List[str]]:
+    v = []
+    for i in range(size):
+        if i < size // 2:
+            v.append(["r%sc%s" % (j, i) for j in range(size // 2 + i + 1)])
+        else:
+            v.append(["r%sc%s" % (j, i) for j in range(i - size // 2, size)])
+    return v
+
+
+def make_yvars(size: int) -> List[List[str]]:
+    v = []
+    for i in range(size):
+        if i < size // 2:
+            v.append(["r%sc%s" % (i, j) for j in range(size // 2 + i + 1)])
+        else:
+            v.append(["r%sc%s" % (i, j) for j in range(i - size // 2, size)])
+    return v
+
+
+def make_zvars(size: int) -> List[List[str]]:
+    v = []
+    for i in range(size):
+        if i < size // 2:
+            v.append(["r%sc%s" % (j, size // 2 - i + j) for j in range(size // 2 + i + 1)])
+        else:
+            v.append(["r%sc%s" % (j, size // 2 - i + j) for j in range(i - size // 2, size)])
+    return v
+
+
 def main() -> None:
     x, y, z, size = parse_crossword()
+    assert size % 2 == 1
+    assert len(x) == len(y) == len(z) == size
+    xvars = make_xvars(size)
+    yvars = make_yvars(size)
+    zvars = make_zvars(size)
     plen = max(max(map(len, g)) for g in (x, y, z))
-    for g in (x, y, z):
-        assert len(g) % 2 == 1
-        for i, p in enumerate(g):
+    for g, vs in ((x, xvars), (y, yvars), (z, zvars)):
+        assert len(g) == len(vs)
+        for i, (char_vars, p) in enumerate(zip(vs, g)):
             n = size - abs(i - len(g)//2)
+            assert len(set(char_vars)) == len(char_vars) == n, (len(char_vars), n)
             try:
                 tree = parse_pattern(p)
-                char_vars = ["v_%s_%s" % (i, j) for j in range(n)]
                 match = next(iter(enumerate_pattern(tree, char_vars, {})))
                 print(p.ljust(plen), match)
             except Exception:
