@@ -1,6 +1,9 @@
 import ast
 import string
-from typing import Any, Tuple, Optional, List
+from typing import Any, Tuple, Optional, List, Iterable, Dict
+
+
+EMPTY = ("concat", [])
 
 
 def parse_pattern(s: str) -> Tuple[str, Any]:
@@ -64,11 +67,12 @@ def parse_pattern(s: str) -> Tuple[str, Any]:
     return parse_alternates(0)[0]
 
 
-def parse_crossword() -> Tuple[List[str], List[str], List[str]]:
+def parse_crossword() -> Tuple[List[str], List[str], List[str], int]:
     group: Optional[List[str]] = None
     x: List[str] = []
     y: List[str] = []
     z: List[str] = []
+    size: Optional[int] = None
     with open("crossword.js") as fp:
         for line in fp:
             if line == "  x: [\n":
@@ -81,19 +85,193 @@ def parse_crossword() -> Tuple[List[str], List[str], List[str]]:
                 group = None
             elif line == "};\n":
                 break
+            elif line.startswith("  size: "):
+                size = int(line.split()[1].strip(","))
             elif group is not None:
                 group.append(ast.literal_eval(line.strip(" ,\n")))
-    return x, y, z
+    assert size is not None
+    return x, y, z, size
+
+
+def enumerate_pattern(tree: Tuple[str, Any], char_vars: List[str], constraints: Dict[str, str]) -> Iterable[str]:
+    r'''
+    >>> def help(p, c):
+    ...     tree = parse_pattern(p)
+    ...     char_vars = [str(i) for i in range(len(c))]
+    ...     constraints = {str(i): b for i, b in enumerate(c) if b != "_"}
+    ...     seen = set()
+    ...     for x in enumerate_pattern(tree, char_vars, constraints):
+    ...         if x in seen:
+    ...             continue
+    ...         seen.add(x)
+    ...         print(x)
+    >>> help(".", "_")
+    .
+    >>> help(".", "A")
+    A
+    >>> help(r"(RR|HHH)*.?", "RRRRHHHRRU")
+    RRRRHHHRRU
+    >>> help(r"[^C]*[^R]*III.*", "HRXRCMIIIHXLS")
+    HRXRCMIIIHXLS
+    >>> help(r"C*MC(CCC|MM)*", "CMCCCCMMMMMM")
+    CMCCCCMMMMMM
+    >>> help(r"N.*X.X.X.*E", "NCXDXEXLE")
+    NCXDXEXLE
+    >>> help("R*D*", "RRRRRRR_")
+    RRRRRRRR
+    RRRRRRRD
+    >>> help("R*D*M*", "RRRRRRR_")
+    RRRRRRRR
+    RRRRRRRD
+    RRRRRRRM
+    '''
+
+    prefix: List[str] = []
+    stack = [tree]
+    captured = []
+
+    def visit() -> Iterable[str]:
+        pos = len(prefix)
+        if not stack:
+            if pos == len(char_vars):
+                # Match!
+                yield "".join(prefix)
+            return
+        if stack[-1][0] == "rep":
+            kind, inner = stack[-1][1]
+            # print("Rep %s at %r" % (kind, "".join(prefix)))
+            if kind == "?":
+                tree = stack.pop()
+                stack.append(inner)
+                yield from visit()
+                stack.pop()
+                yield from visit()
+                stack.append(tree)
+            elif kind == "*":
+                stack.append(inner)
+                yield from visit()
+                stack.pop()
+                tree = stack.pop()
+                yield from visit()
+                stack.append(tree)
+            elif kind == "+":
+                tree = stack.pop()
+                stack.append(inner)
+                stack.append(("rep", ("*", inner)))
+                yield from visit()
+                stack.pop()
+                yield from visit()
+                stack.pop()
+                stack.append(tree)
+            else:
+                raise Exception("Unknown rep kind %r" % (kind,))
+            return
+        if stack[-1][0] == "noanchor":
+            tree = stack.pop()
+            yield "".join(prefix)
+            stack.append(tree)
+            return
+        if stack[-1][0] == "capture":
+            save = stack[:]
+            stack[:] = [("noanchor", None), save[-1][1]]
+            for p in visit():
+                assert not stack
+                captured.append(p[pos:])
+                stack[:] = save[:-1]
+                yield from visit()
+                del stack[:]
+                captured.pop()
+            stack[:] = save
+            return
+        if stack[-1][0] == "backref":
+            n = stack[-1][1]
+            if n - 1 >= len(captured):
+                raise Exception("Backreference \\%s not captured" % n)
+            s = captured[n - 1]
+            save = stack[:]
+            stack.pop()
+            stack.extend([("atom", c) for c in s[::-1]])
+            yield from visit()
+            stack[:] = save
+            return
+        if stack[-1][0] == "alternates":
+            tree = stack.pop()
+            for x in tree[1]:
+                stack.append(x)
+                yield from visit()
+                stack.pop()
+            stack.append(tree)
+            return
+        if stack[-1][0] == "concat":
+            save = stack[:]
+            tree = stack.pop()
+            stack.extend(tree[1][::-1])
+            yield from visit()
+            stack[:] = save
+            return
+        if pos == len(char_vars):
+            # print("No match: end of string, but pattern is not done", stack)
+            return
+        assert pos < len(char_vars)
+        if stack[-1][0] == ".":
+            tree = stack.pop()
+            if char_vars[pos] in constraints:
+                prefix.append(constraints[char_vars[pos]])
+            else:
+                prefix.append(".")
+            yield from visit()
+            stack.append(tree)
+            prefix.pop()
+            return
+        if stack[-1][0] == "atom":
+            tree = stack.pop()
+            if constraints.get(char_vars[pos]) in (None, tree[1][0]):
+                prefix.append(tree[1][0])
+                yield from visit()
+                prefix.pop()
+            stack.append(tree)
+            return
+        if stack[-1][0] == "chargroup":
+            tree = stack.pop()
+            neg, chars = tree[1]
+            constraint = constraints.get(char_vars[pos])
+            if neg:
+                if constraint is None or constraint not in chars:
+                    prefix.append(constraint or "^")
+                    yield from visit()
+                    prefix.pop()
+            else:
+                if constraint is None:
+                    for c in chars:
+                        prefix.append(c)
+                        yield from visit()
+                        prefix.pop()
+                elif constraint in chars:
+                    prefix.append(constraint or "^")
+                    yield from visit()
+                    prefix.pop()
+            stack.append(tree)
+            return
+        raise Exception("Unknown tree type %r" % (stack,))
+
+    return visit()
 
 
 def main() -> None:
-    x, y, z = parse_crossword()
-    for p in x + y + z:
-        try:
-            print(parse_pattern(p))
-        except Exception:
-            print(p)
-            raise
+    x, y, z, size = parse_crossword()
+    plen = max(max(map(len, g)) for g in (x, y, z))
+    for g in (x, y, z):
+        assert len(g) % 2 == 1
+        for i, p in enumerate(g):
+            n = size - abs(i - len(g)//2)
+            try:
+                tree = parse_pattern(p)
+                char_vars = ["v_%s_%s" % (i, j) for j in range(n)]
+                match = next(iter(enumerate_pattern(tree, char_vars, {})))
+                print(p.ljust(plen), match)
+            except Exception:
+                print(p)
+                raise
 
 
 if __name__ == "__main__":
